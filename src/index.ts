@@ -4,6 +4,7 @@ import { LocalStorage } from "node-localstorage";
 
 import { buildSlackMessage, dedupeKey } from "./format.js";
 import type { ListingPayload, SlackMessage } from "./format.js";
+import { getEthJpy, refreshEthJpy, startRatePolling } from "./rate.js";
 
 // ── 監視対象コレクション ────────────────────────────────────────────
 // { slug: 表示名 }。1 行追加すれば監視対象を増やせる。
@@ -14,7 +15,11 @@ const COLLECTIONS: Record<string, string> = {
 
 // ── 環境変数の読み込み・検証 ────────────────────────────────────────
 
-/** ETH_JPY（任意・数値）を解釈する。不正値は無視して undefined を返す。 */
+/**
+ * ETH_JPY（任意・数値）を解釈する。不正値は無視して undefined を返す。
+ * 通常はライブレート（CoinGecko）を使い、これはライブ取得に失敗したときの
+ * フォールバックとして使われる。
+ */
 function parseEthJpy(raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
   const n = Number(raw);
@@ -94,7 +99,9 @@ function handleListing(payload: ListingPayload, displayName: string): void {
   const name = payload.item?.metadata?.name ?? "(no name)";
   console.log(`🔑 新規出品検知: [${displayName}] ${name} (${key})`);
 
-  const message = buildSlackMessage(payload, displayName, ETH_JPY);
+  // ライブレートを優先。未取得なら環境変数 ETH_JPY をフォールバックに使う。
+  const rate = getEthJpy() ?? ETH_JPY;
+  const message = buildSlackMessage(payload, displayName, rate);
   void postToSlack(message);
 }
 
@@ -119,6 +126,14 @@ const client = new OpenSeaStreamClient({
 // ── 起動シーケンス ──────────────────────────────────────────────────
 async function main(): Promise<void> {
   const names = Object.values(COLLECTIONS).join(" / ");
+
+  // ETH→JPY のライブレートを初回取得し、以降は定期更新する。
+  // 取得できなくてもフォールバック（環境変数 ETH_JPY）があれば動く。
+  await refreshEthJpy();
+  startRatePolling();
+  if (getEthJpy() === undefined && ETH_JPY !== undefined) {
+    console.log(`💱 ライブレート未取得のため、フォールバック ¥${ETH_JPY} を使用します`);
+  }
 
   // まず Slack へ起動通知を 1 回 POST（疎通確認を兼ねる）
   await postToSlack({
