@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+
+# editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# node-localstorage scratch dir used by the OpenSea Stream client
+.opensea-stream/
