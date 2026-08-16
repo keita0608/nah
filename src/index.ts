@@ -5,7 +5,7 @@ import { LocalStorage } from "node-localstorage";
 import { COLLECTIONS } from "./collections.js";
 import { buildSlackMessage, dedupeKey } from "./format.js";
 import type { ListingPayload, SlackMessage } from "./format.js";
-import { createThrottledLogger, summarizeError } from "./errors.js";
+import { createThrottledLogger, looksLikeAuthFailure, summarizeError } from "./errors.js";
 import { getEthJpy, refreshEthJpy, startRatePolling } from "./rate.js";
 
 // ── 環境変数の読み込み・検証 ────────────────────────────────────────
@@ -129,6 +129,54 @@ process.on("uncaughtException", (err) => {
 // Stream のエラーは再接続のたびに連続発生しうるので、要約 + 抑制して出力する。
 const logStreamError = createThrottledLogger();
 
+// APIキー失効は「ログには出るが誰も気づかない」まま監視が止まる最悪のケースなので、
+// 認証エラーを検知したら Slack にも警告する（連投を避けて 1 時間に 1 回まで）。
+const AUTH_ALERT_INTERVAL_MS = 60 * 60 * 1000;
+let lastAuthAlertAt = 0;
+
+function handleStreamError(err: unknown): void {
+  logStreamError("Streamエラー", err);
+
+  const summary = summarizeError(err);
+  if (!looksLikeAuthFailure(summary)) return;
+
+  const now = Date.now();
+  if (now - lastAuthAlertAt < AUTH_ALERT_INTERVAL_MS) return;
+  lastAuthAlertAt = now;
+
+  void postToSlack({
+    text: "🚨 nah-watcher: OpenSea APIキーが無効/失効した可能性があります（監視が停止中）",
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text:
+            "🚨 *nah-watcher: 監視が停止している可能性があります*\n" +
+            "OpenSea Stream への接続が認証エラーで失敗しています。\n" +
+            "APIキーの失効が最も多い原因です。",
+        },
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*エラー*\n\`${summary}\`` },
+          { type: "mrkdwn", text: "*対処*\n`npm run doctor` で確認 → キーを再発行" },
+        ],
+      },
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: "キーの失効日は <https://opensea.io/settings/developer|OpenSea Developer 設定> の EXPIRES 列で確認できます",
+          },
+        ],
+      },
+    ],
+  });
+}
+
 // ── OpenSea Stream クライアント初期化（公式 Node.js 手順） ───────────
 const client = new OpenSeaStreamClient({
   token: OPENSEA_API_KEY,
@@ -138,7 +186,7 @@ const client = new OpenSeaStreamClient({
   },
   // 既定は WARN。詳細を見たいときは LOG_LEVEL=info / debug を設定する。
   logLevel: SDK_LOG_LEVEL,
-  onError: (err) => logStreamError("Streamエラー", err),
+  onError: handleStreamError,
 });
 
 // ── 起動シーケンス ──────────────────────────────────────────────────

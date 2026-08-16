@@ -62,9 +62,12 @@ async function checkCollection(slug: string, displayName: string): Promise<boole
     }
     if (res.status === 401 || res.status === 403) {
       console.log(`   ❌ APIキーが拒否されました (HTTP ${res.status})`);
-      console.log(`      → 【最有力】無料枠のAPIキーは発行から7日で失効します。`);
-      console.log(`         opensea.io/settings/developer で無期限キーを発行し直してください。`);
       console.log(`      → サーバ応答: ${text.slice(0, 200)}`);
+      if (text.includes("expired")) {
+        console.log(`      → 【確定】キーが失効しています。`);
+      }
+      console.log(`         opensea.io/settings/developer でキーを発行し直し、.env を更新してください。`);
+      console.log(`         （ダッシュボードの EXPIRES 列で失効日を確認できます）`);
       return false;
     }
     console.log(`   ⚠️ 予期しない応答 (HTTP ${res.status}): ${text.slice(0, 200)}`);
