@@ -38,6 +38,8 @@ OpenSea Stream API (WebSocket)
 - 起動時にまず Slack へ「✅ 起動しました」を 1 回 POST して疎通確認してから購読を開始します。
 - Stream API はベストエフォート配信（再送・順序前後あり）のため、
   `${item.nft_id}-${order_hash ?? event_timestamp}` をキーに直近 2000 件を記憶して二重通知を防ぎます。
+- API キーの失効などで接続が認証エラーになった場合、**Slack に警告を送ります**
+  （監視が無言で止まるのを防ぐため。連投を避けて 1 時間に 1 回まで）。
 
 ## ファイル構成
 
@@ -83,22 +85,25 @@ ETH/JPY を自動取得して併記します。起動時に 1 回取得し、以
 
 ### OpenSea API キーの取得
 
-> ⚠️ **重要: 無料枠キーは発行から 7 日で失効します。**
-> 24 時間常駐させる用途では、必ず**無期限キー**を使ってください。
-> 失効すると Stream は接続できず、**エラーも通知も出ないまま無反応**になります。
+> ⚠️ **重要: OpenSea の API キーには有効期限があります。**
+> 失効すると Stream に接続できず、**Slack 通知が止まったまま無反応**になります
+> （REST では `{"errors":["API key has expired"]}` が返ります）。
 
-**推奨: 無期限キー（本番用）**
+**推奨: ダッシュボードで発行するキー（本番用）**
 
-<https://opensea.io/settings/developer> でアカウントにログインし、
-永続的な API キーを発行します（有効期限なし・レート上限が高い・後からローテート可能）。
+<https://opensea.io/settings/developer> にログインし、**Create key** でキーを発行します。
+一覧に `CREATED` / `EXPIRES` が表示されるので、**失効日をここで確認できます**
+（実測例: 2026-08-16 発行 → 2031-08-15 失効。約 5 年）。
+レート上限も高く、後からローテートできるため常駐運用にはこちらを使ってください。
 
-**お試し用: 無料枠キー（7 日で失効）**
+**お試し用: 自己発行キー（短期間で失効）**
 
 ```bash
 curl -s -X POST https://api.opensea.io/api/v2/auth/keys | jq -r '.api_key'
 ```
 
-このコマンドで得られるキーは**7 日間だけ有効**です（レスポンスの `expires_at` に失効日時が入ります）。
+サインアップ不要で即発行できますが、**短期間で失効します**
+（レスポンスの `expires_at` に失効日時が入るので確認してください）。
 動作確認には便利ですが、常駐運用には向きません。
 
 出力された文字列を `OPENSEA_API_KEY` に設定します。
@@ -192,7 +197,7 @@ APIキーの有効性・スラッグの実在・出品の有無・レート取�
 
 | 症状 | 原因 | 対処 |
 | --- | --- | --- |
-| ログに `Unexpected server response: 401` / `403` | **APIキーの失効**（無料枠は7日）。最も多い | 無期限キーを発行し直す |
+| ログに `Unexpected server response: 401` / `403` | **APIキーの失効**。最も多い | ダッシュボードでキーを発行し直す |
 | ログに `❌ スラッグが存在しません` | コレクションのスラッグ違い | `src/collections.ts` を修正 |
 | 起動通知は届くが出品通知が来ない | 単に新規出品が発生していない | `npm run doctor` で出品状況を確認 |
 | Slack通知だけ来ない | Webhook URL 失効 | `npm run test:notify` で疎通確認 |
@@ -216,11 +221,15 @@ findstr /C:"新規出品検知" watcher.log
 （再接続が続いても肥大化しません）。それでも長期運用でログを抑えたい場合は、
 NSSM 側のローテーションを有効にしてください:
 
+> ⚠️ `nssm` は PATH に入っていないことが多いので、**フルパスで実行**してください
+> （例: `C:\nssm\win64\nssm.exe`）。また `stop` / `start` / `set` は**管理者権限**が必要です。
+> 毎回打つのが面倒なら `nssm.exe` を `C:\Windows\` にコピーすると `nssm ...` だけで実行できます。
+
 ```bat
-nssm set nah-watcher AppRotateFiles 1
-nssm set nah-watcher AppRotateOnline 1
-nssm set nah-watcher AppRotateBytes 10485760
-nssm restart nah-watcher
+C:\nssm\win64\nssm.exe set nah-watcher AppRotateFiles 1
+C:\nssm\win64\nssm.exe set nah-watcher AppRotateOnline 1
+C:\nssm\win64\nssm.exe set nah-watcher AppRotateBytes 10485760
+C:\nssm\win64\nssm.exe restart nah-watcher
 ```
 
 （10MB を超えたらローテーション。`AppRotateSeconds 86400` で日次ローテも可能）
@@ -228,10 +237,13 @@ nssm restart nah-watcher
 すでに巨大なログができてしまっている場合は、サービスを止めてから削除します:
 
 ```bat
-nssm stop nah-watcher
+C:\nssm\win64\nssm.exe stop nah-watcher
 del watcher.log
-nssm start nah-watcher
+C:\nssm\win64\nssm.exe start nah-watcher
 ```
+
+> `del` で「別のプロセスが使用中です」と出る場合は、`stop` が効いていません
+> （管理者権限か、nssm のパスを確認してください）。サービスが停止していれば削除できます。
 
 ## OpenSea Stream API の制約（重要）
 
