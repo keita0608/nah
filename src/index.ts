@@ -1,17 +1,12 @@
-import { OpenSeaStreamClient } from "@opensea/stream-js";
+import { OpenSeaStreamClient, LogLevel } from "@opensea/stream-js";
 import { WebSocket } from "ws";
 import { LocalStorage } from "node-localstorage";
 
+import { COLLECTIONS } from "./collections.js";
 import { buildSlackMessage, dedupeKey } from "./format.js";
 import type { ListingPayload, SlackMessage } from "./format.js";
+import { createThrottledLogger, summarizeError } from "./errors.js";
 import { getEthJpy, refreshEthJpy, startRatePolling } from "./rate.js";
-
-// ── 監視対象コレクション ────────────────────────────────────────────
-// { slug: 表示名 }。1 行追加すれば監視対象を増やせる。
-const COLLECTIONS: Record<string, string> = {
-  "the-key-nah": "THE KEY",
-  "membership-s": "MEMBERSHIP S",
-};
 
 // ── 環境変数の読み込み・検証 ────────────────────────────────────────
 
@@ -29,6 +24,23 @@ function parseEthJpy(raw: string | undefined): number | undefined {
   }
   return n;
 }
+
+/**
+ * SDK のログ量。既定は WARN（再接続のたびに出る INFO ログでファイルが
+ * 肥大化するため）。詳細が見たいときだけ LOG_LEVEL=info / debug を設定する。
+ */
+const SDK_LOG_LEVEL: LogLevel = ((): LogLevel => {
+  switch ((process.env.LOG_LEVEL ?? "").trim().toLowerCase()) {
+    case "debug":
+      return LogLevel.DEBUG;
+    case "info":
+      return LogLevel.INFO;
+    case "error":
+      return LogLevel.ERROR;
+    default:
+      return LogLevel.WARN;
+  }
+})();
 
 function readEnv(): { apiKey: string; webhookUrl: string; ethJpy?: number } {
   const apiKey = process.env.OPENSEA_API_KEY;
@@ -83,7 +95,7 @@ async function postToSlack(message: SlackMessage): Promise<void> {
       console.error(`Slack通知失敗: HTTP ${res.status} ${res.statusText} ${body}`.trim());
     }
   } catch (err) {
-    console.error("Slack通知でエラー:", err);
+    console.error(`Slack通知でエラー: ${summarizeError(err)}`);
   }
 }
 
@@ -106,12 +118,16 @@ function handleListing(payload: ListingPayload, displayName: string): void {
 }
 
 // ── プロセス全体のエラーハンドリング ────────────────────────────────
+// オブジェクト全体をダンプするとログが肥大化するため、1 行に要約して出力する。
 process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
+  console.error("unhandledRejection:", summarizeError(reason));
 });
 process.on("uncaughtException", (err) => {
-  console.error("uncaughtException:", err);
+  console.error("uncaughtException:", summarizeError(err));
 });
+
+// Stream のエラーは再接続のたびに連続発生しうるので、要約 + 抑制して出力する。
+const logStreamError = createThrottledLogger();
 
 // ── OpenSea Stream クライアント初期化（公式 Node.js 手順） ───────────
 const client = new OpenSeaStreamClient({
@@ -120,7 +136,9 @@ const client = new OpenSeaStreamClient({
     transport: WebSocket as any,
     sessionStorage: LocalStorage as any,
   },
-  onError: (err) => console.error("Streamエラー:", err),
+  // 既定は WARN。詳細を見たいときは LOG_LEVEL=info / debug を設定する。
+  logLevel: SDK_LOG_LEVEL,
+  onError: (err) => logStreamError("Streamエラー", err),
 });
 
 // ── 起動シーケンス ──────────────────────────────────────────────────
@@ -155,7 +173,7 @@ async function main(): Promise<void> {
       try {
         handleListing(event.payload, displayName);
       } catch (err) {
-        console.error(`[${displayName}] ハンドラでエラー:`, err);
+        console.error(`[${displayName}] ハンドラでエラー: ${summarizeError(err)}`);
       }
     });
     console.log(`👀 購読開始: ${displayName} (${slug})`);
@@ -165,6 +183,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("起動シーケンスでエラー:", err);
+  console.error(`起動シーケンスでエラー: ${summarizeError(err)}`);
   process.exit(1);
 });

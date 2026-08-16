@@ -7,6 +7,8 @@
  * 一度も取れていない場合は呼び出し側のフォールバック（環境変数 ETH_JPY）を使う。
  */
 
+import { summarizeError } from "./errors.js";
+
 /** 既定のポーリング間隔（5 分）。各 API の無料枠レート制限に配慮。 */
 export const DEFAULT_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -81,11 +83,18 @@ export async function refreshEthJpy(): Promise<void> {
         console.error(`ETH価格取得 (${source.name}): レスポンス形式が想定外でした`);
         continue;
       }
+      // ログ肥大化を避けるため、初回と「1%以上変動したとき」だけ出力する。
+      const changedEnough =
+        cachedRate === undefined || Math.abs(rate - cachedRate) / cachedRate >= 0.01;
       cachedRate = rate;
-      console.log(`💱 ETH/JPY 更新: 約¥${Math.round(rate).toLocaleString("en-US")} (${source.name})`);
+      if (changedEnough) {
+        console.log(
+          `💱 ETH/JPY 更新: 約¥${Math.round(rate).toLocaleString("en-US")} (${source.name})`,
+        );
+      }
       return;
     } catch (err) {
-      console.error(`ETH価格取得でエラー (${source.name}):`, err);
+      console.error(`ETH価格取得でエラー (${source.name}): ${summarizeError(err)}`);
     }
   }
   console.error("ETH価格: すべてのソースで取得に失敗しました（直近値 / フォールバックを使用）");
