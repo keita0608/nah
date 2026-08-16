@@ -12,7 +12,7 @@ Node / TypeScript 製の常駐サービスです。Railway での 24 時間常�
 | `membership-s` | MEMBERSHIP S   |
 
 両コレクションの `item_listed` を **全件**（価格・属性フィルタなし）監視します。
-監視対象は `src/index.ts` の `COLLECTIONS`（`{ slug: 表示名 }`）に 1 行追加するだけで増やせます。
+監視対象は `src/collections.ts` の `COLLECTIONS`（`{ slug: 表示名 }`）に 1 行追加するだけで増やせます。
 
 ```ts
 const COLLECTIONS: Record<string, string> = {
@@ -43,14 +43,19 @@ OpenSea Stream API (WebSocket)
 
 ```
 .
-├─ src/index.ts        本体（接続・購読・通知）
-├─ src/format.ts       整形ロジック（純粋関数・テスト対象）
-├─ src/format.test.ts  ユニットテスト
-├─ package.json        scripts: build / start / dev / test
-├─ tsconfig.json       ES2022 / ESM / strict / outDir dist
-├─ railway.json        NIXPACKS・restartPolicy ALWAYS(最大10)
-├─ .env.example        環境変数テンプレート
-├─ .gitignore          node_modules / dist / .env / *.log
+├─ src/index.ts         本体（接続・購読・通知）
+├─ src/collections.ts   監視対象コレクション定義（1行追加で増やせる）
+├─ src/format.ts        整形ロジック（純粋関数・テスト対象）
+├─ src/rate.ts          ETH→JPY ライブレート取得
+├─ src/errors.ts        エラー要約・ログ抑制（ログ肥大化対策）
+├─ src/doctor.ts        診断スクリプト（npm run doctor）
+├─ src/test-notify.ts   Slack通知の手動テスト（npm run test:notify）
+├─ src/*.test.ts        ユニットテスト
+├─ package.json         scripts: build / start / dev / test / doctor / test:notify
+├─ tsconfig.json        ES2022 / ESM / strict / outDir dist
+├─ railway.json         NIXPACKS・restartPolicy ALWAYS(最大10)
+├─ .env.example         環境変数テンプレート
+├─ .gitignore           node_modules / dist / .env / *.log
 └─ README.md
 ```
 
@@ -63,6 +68,7 @@ OpenSea Stream API (WebSocket)
 | `OPENSEA_API_KEY`   |  ✅  | OpenSea API キー                                                     |
 | `SLACK_WEBHOOK_URL` |  ✅  | Slack Incoming Webhook URL                                           |
 | `ETH_JPY`           |      | ETH→JPY レートの**フォールバック**値（数値）。通常はライブレートを自動取得（後述）。ライブ取得に失敗したときだけこの値を使う |
+| `LOG_LEVEL`         |      | ログ量。既定 `warn`。詳細を見たいときのみ `info` / `debug`（常駐時は既定のままを推奨） |
 
 必須 2 つが無ければ起動時に明確なエラーを出して `process.exit(1)` します。
 
@@ -77,12 +83,32 @@ ETH/JPY を自動取得して併記します。起動時に 1 回取得し、以
 
 ### OpenSea API キーの取得
 
+> ⚠️ **重要: 無料枠キーは発行から 7 日で失効します。**
+> 24 時間常駐させる用途では、必ず**無期限キー**を使ってください。
+> 失効すると Stream は接続できず、**エラーも通知も出ないまま無反応**になります。
+
+**推奨: 無期限キー（本番用）**
+
+<https://opensea.io/settings/developer> でアカウントにログインし、
+永続的な API キーを発行します（有効期限なし・レート上限が高い・後からローテート可能）。
+
+**お試し用: 無料枠キー（7 日で失効）**
+
 ```bash
 curl -s -X POST https://api.opensea.io/api/v2/auth/keys | jq -r '.api_key'
 ```
 
+このコマンドで得られるキーは**7 日間だけ有効**です（レスポンスの `expires_at` に失効日時が入ります）。
+動作確認には便利ですが、常駐運用には向きません。
+
 出力された文字列を `OPENSEA_API_KEY` に設定します。
 （参考: [OpenSea API docs](https://docs.opensea.io/reference/api-keys)）
+
+キーが生きているかは、いつでも次で確認できます:
+
+```bash
+npm run doctor
+```
 
 ### Slack Incoming Webhook の発行
 
@@ -111,9 +137,11 @@ npm run dev
 その他のスクリプト:
 
 ```bash
-npm test         # src/format.ts の純粋関数をユニットテスト
-npm run build    # tsc で dist/ に出力
-npm start        # node dist/index.js（ビルド済みを実行 = 本番相当）
+npm test           # 純粋関数のユニットテスト
+npm run build      # tsc で dist/ に出力
+npm start          # node dist/index.js（ビルド済みを実行 = 本番相当）
+npm run doctor     # 設定診断（APIキー・スラッグ・出品状況）
+npm run test:notify # Slackにテスト通知を1通送る
 ```
 
 > `npm run dev` / `npm start` は `.env` を自動読み込みしません。
@@ -148,6 +176,62 @@ WebSocket を張り続ける常駐プロセスなので、Railway のような
 Vercel（サーバーレス関数）や Cloudflare Workers（リクエスト駆動・短命）は
 長時間の常駐接続に向かないため **非推奨**です。
 Railway / Render / Fly.io / VPS など「プロセスを起動しっぱなしにできる」環境を使ってください。
+
+## トラブルシューティング
+
+### まず診断する
+
+```bash
+npm run doctor
+```
+
+APIキーの有効性・スラッグの実在・出品の有無・レート取得を一括で確認します。
+「起動しているのに通知が来ない」ときは、まずこれを実行してください。
+
+### 症状別の切り分け
+
+| 症状 | 原因 | 対処 |
+| --- | --- | --- |
+| ログに `Unexpected server response: 401` / `403` | **APIキーの失効**（無料枠は7日）。最も多い | 無期限キーを発行し直す |
+| ログに `❌ スラッグが存在しません` | コレクションのスラッグ違い | `src/collections.ts` を修正 |
+| 起動通知は届くが出品通知が来ない | 単に新規出品が発生していない | `npm run doctor` で出品状況を確認 |
+| Slack通知だけ来ない | Webhook URL 失効 | `npm run test:notify` で疎通確認 |
+
+`Successfully joined channel` は**スラッグが正しい証明にはなりません**。
+Stream API は存在しないスラッグでも参加を受け付けるため、
+スラッグの検証は必ず `npm run doctor`（REST API 経由）で行ってください。
+
+### ログの確認
+
+Windows でログを検索する例:
+
+```bat
+findstr /C:"Unexpected server response" watcher.log
+findstr /C:"新規出品検知" watcher.log
+```
+
+### ログが肥大化する場合
+
+本サービスはエラーを 1 行に要約し、同一エラーの連続出力を 60 秒間抑制します
+（再接続が続いても肥大化しません）。それでも長期運用でログを抑えたい場合は、
+NSSM 側のローテーションを有効にしてください:
+
+```bat
+nssm set nah-watcher AppRotateFiles 1
+nssm set nah-watcher AppRotateOnline 1
+nssm set nah-watcher AppRotateBytes 10485760
+nssm restart nah-watcher
+```
+
+（10MB を超えたらローテーション。`AppRotateSeconds 86400` で日次ローテも可能）
+
+すでに巨大なログができてしまっている場合は、サービスを止めてから削除します:
+
+```bat
+nssm stop nah-watcher
+del watcher.log
+nssm start nah-watcher
+```
 
 ## OpenSea Stream API の制約（重要）
 
